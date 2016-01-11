@@ -212,4 +212,5 @@ end
 
 gem 'rails_12factor', group: :production
 
-gem 'redis-namespace'
+gem 'rails_serve_static_assets'
+
