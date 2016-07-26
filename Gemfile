@@ -1,39 +1,12 @@
-#source 'https://rubygems.org'
+source 'https://rubygems.org'
 # if there is a super emergency and rubygems is playing up, try
-source 'http://production.cf.rubygems.org'
-ruby "2.2.4"
+#source 'http://production.cf.rubygems.org'
+ruby "2.3.1"
 
-def rails_master?
-  ENV["RAILS_MASTER"] == '1'
-end
+gem 'rails', '~> 4.2'
 
-if rails_master?
-  gem 'arel', git: 'https://github.com/rails/arel.git'
-  gem 'rails', git: 'https://github.com/rails/rails.git'
-  gem 'rails-observers', git: 'https://github.com/rails/rails-observers.git'
-  gem 'seed-fu', git: 'https://github.com/SamSaffron/seed-fu.git', branch: 'discourse'
-else
-  # Rails 5 is going to ship with Action Cable, we have no use for it as
-  # we already ship MessageBus, AC introduces dependencies on Event Machine,
-  # Celluloid and Faye Web Sockets.
-  #
-  # Note this means upgrading Rails is more annoying, to do so, comment out the
-  # explicit dependencies, and add gem 'rails', bundle update rails and then
-  # comment back the explicit dependencies. Leaving this in a comment till we
-  # upgrade to Rails 5
-  #
-  # gem 'activesupport'
-  # gem 'actionpack'
-  # gem 'activerecord'
-  # gem 'actionmailer'
-  # gem 'activejob'
-  # gem 'railties'
-  # gem 'sprockets-rails'
-  gem 'rails', '~> 4.2'
-
-  gem 'rails-observers'
-  gem 'seed-fu', '~> 2.3.5'
-end
+gem 'rails-observers'
+gem 'seed-fu', '~> 2.3.5'
 
 gem 'mail'
 gem 'mime-types', require: 'mime/types/columnar'
