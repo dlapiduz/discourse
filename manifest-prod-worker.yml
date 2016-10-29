@@ -4,8 +4,9 @@ applications:
   memory: 512M
   instances: 1
   no-route: true
-  command: bundle exec sidekiq -e $RAILS_ENV 
+  command: bundle exec sidekiq -e $RAILS_ENV
+  health-check-type: none
 services:
-  - community-redis-swarm
+  - community-redis
   - community-db
-  - discourse-env
+  - email

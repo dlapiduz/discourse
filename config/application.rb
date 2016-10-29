@@ -47,6 +47,8 @@ module Discourse
       end
     end
 
+    config.assets.initialize_on_precompile = false
+
     # Disable so this is only run manually
     # we may want to change this later on
     # issue is image_optim crashes on missing dependencies
