@@ -1,6 +1,6 @@
 import { on } from 'ember-addons/ember-computed-decorators';
 import StringBuffer from 'discourse/mixins/string-buffer';
-import { iconHTML } from 'discourse/helpers/fa-icon';
+import { iconHTML } from 'discourse-common/helpers/fa-icon';
 import LogsNotice from 'discourse/services/logs-notice';
 
 export default Ember.Component.extend(StringBuffer, {
@@ -15,6 +15,19 @@ export default Ember.Component.extend(StringBuffer, {
 
     if (this.siteSettings.disable_emails) {
       notices.push([I18n.t("emails_are_disabled"), 'alert-emails-disabled']);
+    }
+
+    if (this.site.get('wizard_required')) {
+      const requiredText = I18n.t('wizard_required', {url: Discourse.getURL('/wizard')});
+      notices.push([requiredText, 'alert-wizard']);
+    }
+
+    if (this.currentUser && this.currentUser.get('staff') && this.siteSettings.bootstrap_mode_enabled) {
+      if (this.siteSettings.bootstrap_mode_min_users > 0) {
+        notices.push([I18n.t("bootstrap_mode_enabled", {min_users: this.siteSettings.bootstrap_mode_min_users}), 'alert-bootstrap-mode']);
+      } else {
+        notices.push([I18n.t("bootstrap_mode_disabled"), 'alert-bootstrap-mode']);
+      }
     }
 
     if (!_.isEmpty(this.siteSettings.global_notice)) {

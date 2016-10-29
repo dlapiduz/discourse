@@ -10,6 +10,7 @@ export default {
     this.resource('adminEmail', { path: '/email'}, function() {
       this.route('sent');
       this.route('skipped');
+      this.route('bounced');
       this.route('received');
       this.route('rejected');
       this.route('previewDigest', { path: '/preview-digest' });
@@ -34,7 +35,15 @@ export default {
         this.route('edit', { path: '/:id' });
       });
     });
-    this.route('api');
+
+    this.resource('adminApi', { path: '/api' }, function() {
+      this.resource('adminApiKeys', { path: '/keys' });
+
+      this.resource('adminWebHooks', { path: '/web_hooks' }, function() {
+        this.route('show', { path: '/:web_hook_id' });
+        this.route('showEvents', { path: '/:web_hook_id/events' });
+      });
+    });
 
     this.resource('admin.backups', { path: '/backups' }, function() {
       this.route('logs');

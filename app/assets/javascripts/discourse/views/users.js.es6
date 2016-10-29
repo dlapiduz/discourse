@@ -1,5 +1,3 @@
-import LoadMore from 'discourse/mixins/load-more';
+import { createViewWithBodyClass } from 'discourse/lib/create-view';
 
-export default Ember.View.extend(LoadMore, {
-  eyelineSelector: '.directory tbody tr'
-});
+export default createViewWithBodyClass('users-page');

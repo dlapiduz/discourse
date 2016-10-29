@@ -65,7 +65,11 @@ class UserSerializer < BasicUserSerializer
              :user_fields,
              :topic_post_count,
              :pending_count,
-             :profile_view_count
+             :profile_view_count,
+             :primary_group_name,
+             :primary_group_flair_url,
+             :primary_group_flair_bg_color,
+             :primary_group_flair_color
 
   has_one :invited_by, embed: :object, serializer: BasicUserSerializer
   has_many :groups, embed: :object, serializer: BasicGroupSerializer
@@ -83,8 +87,13 @@ class UserSerializer < BasicUserSerializer
 
   private_attributes :locale,
                      :muted_category_ids,
+                     :watched_tags,
+                     :watching_first_post_tags,
+                     :tracked_tags,
+                     :muted_tags,
                      :tracked_category_ids,
                      :watched_category_ids,
+                     :watched_first_post_category_ids,
                      :private_messages_stats,
                      :system_avatar_upload_id,
                      :system_avatar_template,
@@ -96,7 +105,9 @@ class UserSerializer < BasicUserSerializer
                      :card_image_badge,
                      :card_image_badge_id,
                      :muted_usernames,
-                     :mailing_list_posts_per_day
+                     :mailing_list_posts_per_day,
+                     :can_change_bio,
+                     :user_api_keys
 
   untrusted_attributes :bio_raw,
                        :bio_cooked,
@@ -127,6 +138,24 @@ class UserSerializer < BasicUserSerializer
     object.id && object.id == scope.user.try(:id)
   end
 
+  def can_change_bio
+    !(SiteSetting.enable_sso && SiteSetting.sso_overrides_bio)
+  end
+
+
+  def user_api_keys
+    keys = object.user_api_keys.where(revoked_at: nil).map do |k|
+      {
+        id: k.id,
+        application_name: k.application_name,
+        scopes: k.scopes.map{|s| I18n.t("user_api_key.scopes.#{s}")},
+        created_at: k.created_at
+      }
+    end
+
+    keys.length > 0 ? keys : nil
+  end
+
   def card_badge
     object.user_profile.card_image_badge
   end
@@ -144,19 +173,9 @@ class UserSerializer < BasicUserSerializer
   end
 
   def website_name
-    website_host = URI(website.to_s).host rescue nil
-    discourse_host = Discourse.current_hostname
-    return if website_host.nil?
-    if website_host == discourse_host
-      # example.com == example.com
-      website_host + URI(website.to_s).path
-    elsif (website_host.split('.').length == discourse_host.split('.').length) && discourse_host.split('.').length > 2
-      # www.example.com == forum.example.com
-      website_host.split('.')[1..-1].join('.') == discourse_host.split('.')[1..-1].join('.') ? website_host + URI(website.to_s).path : website_host
-    else
-      # example.com == forum.example.com
-      discourse_host.ends_with?("." << website_host) ? website_host + URI(website.to_s).path : website_host
-    end
+    uri = URI(website.to_s) rescue nil
+    return if uri.nil? || uri.host.nil?
+    uri.host.sub(/^www\./,'') + uri.path
   end
 
   def include_website_name
@@ -237,6 +256,22 @@ class UserSerializer < BasicUserSerializer
     object.suspended?
   end
 
+  def primary_group_name
+    object.primary_group.try(:name)
+  end
+
+  def primary_group_flair_url
+    object.try(:primary_group).try(:flair_url)
+  end
+
+  def primary_group_flair_bg_color
+    object.try(:primary_group).try(:flair_bg_color)
+  end
+
+  def primary_group_flair_color
+    object.try(:primary_group).try(:flair_color)
+  end
+
   ###
   ### STAFF ATTRIBUTES
   ###
@@ -256,6 +291,21 @@ class UserSerializer < BasicUserSerializer
   ###
   ### PRIVATE ATTRIBUTES
   ###
+  def muted_tags
+    TagUser.lookup(object, :muted).joins(:tag).pluck('tags.name')
+  end
+
+  def tracked_tags
+    TagUser.lookup(object, :tracking).joins(:tag).pluck('tags.name')
+  end
+
+  def watching_first_post_tags
+    TagUser.lookup(object, :watching_first_post).joins(:tag).pluck('tags.name')
+  end
+
+  def watched_tags
+    TagUser.lookup(object, :watching).joins(:tag).pluck('tags.name')
+  end
 
   def muted_category_ids
     CategoryUser.lookup(object, :muted).pluck(:category_id)
@@ -267,6 +317,10 @@ class UserSerializer < BasicUserSerializer
 
   def watched_category_ids
     CategoryUser.lookup(object, :watching).pluck(:category_id)
+  end
+
+  def watched_first_post_category_ids
+    CategoryUser.lookup(object, :watching_first_post).pluck(:category_id)
   end
 
   def muted_usernames

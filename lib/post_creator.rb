@@ -32,6 +32,10 @@ class PostCreator
   #   via_email               - Mark this post as arriving via email
   #   raw_email               - Full text of arriving email (to store)
   #   action_code             - Describes a small_action post (optional)
+  #   skip_jobs               - Don't enqueue jobs when creation succeeds. This is needed if you
+  #                             wrap `PostCreator` in a transaction, as the sidekiq jobs could
+  #                             dequeue before the commit finishes. If you do this, be sure to
+  #                             call `enqueue_jobs` after the transaction is comitted.
   #
   #   When replying to a topic:
   #     topic_id              - topic we're replying to
@@ -102,6 +106,7 @@ class PostCreator
     setup_post
 
     return true if skip_validations?
+
     if @post.has_host_spam?
       @spam = true
       errors[:base] << I18n.t(:spamming_host)
@@ -144,10 +149,12 @@ class PostCreator
       publish
 
       track_latest_on_category
-      enqueue_jobs
+      enqueue_jobs unless @opts[:skip_jobs]
       BadgeGranter.queue_badge_grant(Badge::Trigger::PostRevision, post: @post)
 
       trigger_after_events(@post)
+
+      auto_close unless @opts[:import_mode]
     end
 
     if @post || @spam
@@ -155,6 +162,21 @@ class PostCreator
     end
 
     @post
+  end
+
+  def create!
+    create
+
+    if !self.errors.full_messages.empty?
+      raise ActiveRecord::RecordNotSaved.new("Failed to create post", self)
+    end
+
+    @post
+  end
+
+  def enqueue_jobs
+    return unless @post && !@post.errors.present?
+    PostJobsEnqueuer.new(@post, @topic, new_topic?, {import_mode: @opts[:import_mode]}).enqueue_jobs
   end
 
   def self.track_post_stats
@@ -167,6 +189,10 @@ class PostCreator
 
   def self.create(user, opts)
     PostCreator.new(user, opts).create
+  end
+
+  def self.create!(user, opts)
+    PostCreator.new(user, opts).create!
   end
 
   def self.before_create_tasks(post)
@@ -219,6 +245,26 @@ class PostCreator
   def trigger_after_events(post)
     DiscourseEvent.trigger(:topic_created, post.topic, @opts, @user) unless @opts[:topic_id]
     DiscourseEvent.trigger(:post_created, post, @opts, @user)
+  end
+
+  def auto_close
+    if @post.topic.private_message? &&
+        !@post.topic.closed &&
+        SiteSetting.auto_close_messages_post_count > 0 &&
+        SiteSetting.auto_close_messages_post_count <= @post.topic.posts_count
+
+      @post.topic.update_status(:closed, true, Discourse.system_user,
+          message: I18n.t('topic_statuses.autoclosed_message_max_posts', count: SiteSetting.auto_close_messages_post_count))
+
+    elsif !@post.topic.private_message? &&
+        !@post.topic.closed &&
+        SiteSetting.auto_close_topics_post_count > 0 &&
+        SiteSetting.auto_close_topics_post_count <= @post.topic.posts_count
+
+      @post.topic.update_status(:closed, true, Discourse.system_user,
+          message: I18n.t('topic_statuses.autoclosed_topic_max_posts', count: SiteSetting.auto_close_topics_post_count))
+
+    end
   end
 
   def transaction(&blk)
@@ -293,8 +339,7 @@ class PostCreator
       topic_creator = TopicCreator.new(@user, guardian, @opts)
       @topic = topic_creator.create
     rescue ActiveRecord::Rollback
-      add_errors_from(topic_creator)
-      return
+      rollback_from_errors!(topic_creator)
     end
     @post.topic_id = @topic.id
     @post.topic = @topic
@@ -353,6 +398,8 @@ class PostCreator
   end
 
   def update_user_counts
+    return if @opts[:import_mode]
+
     @user.create_user_stat if @user.user_stat.nil?
 
     if @user.user_stat.first_post_created_at.nil?
@@ -389,29 +436,28 @@ class PostCreator
   def track_topic
     return if @opts[:auto_track] == false
 
-    TopicUser.change(@post.user_id,
-                     @topic.id,
-                     posted: true,
-                     last_read_post_number: @post.post_number,
-                     highest_seen_post_number: @post.post_number)
+    unless @user.user_option.disable_jump_reply?
+      TopicUser.change(@post.user_id,
+                       @topic.id,
+                       posted: true,
+                       last_read_post_number: @post.post_number,
+                       highest_seen_post_number: @post.post_number)
 
 
-    # assume it took us 5 seconds of reading time to make a post
-    PostTiming.record_timing(topic_id: @post.topic_id,
-                             user_id: @post.user_id,
-                             post_number: @post.post_number,
-                             msecs: 5000)
+      # assume it took us 5 seconds of reading time to make a post
+      PostTiming.record_timing(topic_id: @post.topic_id,
+                               user_id: @post.user_id,
+                               post_number: @post.post_number,
+                               msecs: 5000)
+    end
 
     if @user.staged
-      TopicUser.auto_watch(@user.id, @topic.id)
+      TopicUser.auto_notification_for_staging(@user.id, @topic.id, TopicUser.notification_reasons[:auto_watch])
+    elsif @user.user_option.notification_level_when_replying === NotificationLevels.topic_levels[:watching]
+      TopicUser.auto_notification(@user.id, @topic.id, TopicUser.notification_reasons[:created_post], NotificationLevels.topic_levels[:watching])
     else
-      TopicUser.auto_track(@user.id, @topic.id, TopicUser.notification_reasons[:created_post])
+      TopicUser.auto_notification(@user.id, @topic.id, TopicUser.notification_reasons[:created_post], NotificationLevels.topic_levels[:tracking])
     end
-  end
-
-  def enqueue_jobs
-    return unless @post && !@post.errors.present?
-    PostJobsEnqueuer.new(@post, @topic, new_topic?, {import_mode: @opts[:import_mode]}).enqueue_jobs
   end
 
   def new_topic?

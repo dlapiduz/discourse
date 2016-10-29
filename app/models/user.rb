@@ -18,6 +18,8 @@ class User < ActiveRecord::Base
   has_many :notifications, dependent: :destroy
   has_many :topic_users, dependent: :destroy
   has_many :category_users, dependent: :destroy
+  has_many :tag_users, dependent: :destroy
+  has_many :user_api_keys, dependent: :destroy
   has_many :topics
   has_many :user_open_ids, dependent: :destroy
   has_many :user_actions, dependent: :destroy
@@ -25,11 +27,11 @@ class User < ActiveRecord::Base
   has_many :user_badges, -> { where('user_badges.badge_id IN (SELECT id FROM badges WHERE enabled)') }, dependent: :destroy
   has_many :badges, through: :user_badges
   has_many :email_logs, dependent: :delete_all
+  has_many :incoming_emails, dependent: :delete_all
   has_many :post_timings
   has_many :topic_allowed_users, dependent: :destroy
   has_many :topics_allowed, through: :topic_allowed_users, source: :topic
   has_many :email_tokens, dependent: :destroy
-  has_many :views
   has_many :user_visits, dependent: :destroy
   has_many :invites, dependent: :destroy
   has_many :topic_links, dependent: :destroy
@@ -71,7 +73,7 @@ class User < ActiveRecord::Base
   validates_presence_of :username
   validate :username_validator, if: :username_changed?
   validates :email, presence: true, uniqueness: true
-  validates :email, email: true, if: :email_changed?
+  validates :email, email: true, if: :should_validate_email?
   validate :password_validator
   validates :name, user_full_name: true, if: :name_changed?
   validates :ip_address, allowed_ip_address: {on: :create, message: :signup_not_allowed}
@@ -85,6 +87,7 @@ class User < ActiveRecord::Base
   after_create :ensure_in_trust_level_group
   after_create :automatic_group_membership
   after_create :set_default_categories_preferences
+  after_create :trigger_user_created_event
 
   before_save :update_username_lower
   before_save :ensure_password_is_hashed
@@ -99,6 +102,9 @@ class User < ActiveRecord::Base
     PostTiming.delete_all(user_id: self.id)
     TopicViewItem.delete_all(user_id: self.id)
   end
+
+  # Skip validating email, for example from a particular auth provider plugin
+  attr_accessor :skip_email_validation
 
   # Whether we need to be sending a system message after creation
   attr_accessor :send_welcome_message
@@ -145,7 +151,9 @@ class User < ActiveRecord::Base
 
   def self.username_available?(username)
     lower = username.downcase
-    User.where(username_lower: lower).blank? && !SiteSetting.reserved_usernames.split("|").include?(username)
+
+    User.where(username_lower: lower).blank? &&
+      !SiteSetting.reserved_usernames.split("|").any? { |reserved| reserved.casecmp(username) == 0 }
   end
 
   def self.plugin_staff_user_custom_fields
@@ -243,6 +251,10 @@ class User < ActiveRecord::Base
     used_invite.try(:invited_by)
   end
 
+  def should_validate_email?
+    return !skip_email_validation && !staged? && email_changed?
+  end
+
   # Approve this user
   def approve(approved_by, send_mail=true)
     self.approved = true
@@ -255,7 +267,12 @@ class User < ActiveRecord::Base
 
     self.approved_at = Time.now
 
-    send_approval_email if save and send_mail
+    if result = save
+      send_approval_email if send_mail
+      DiscourseEvent.trigger(:user_approved, self)
+    end
+
+    result
   end
 
   def self.email_hash(email)
@@ -318,8 +335,12 @@ class User < ActiveRecord::Base
   end
 
   def saw_notification_id(notification_id)
-    User.where("id = ? and seen_notification_id < ?", id, notification_id)
-        .update_all ["seen_notification_id = ?", notification_id]
+    if seen_notification_id.to_i < notification_id.to_i
+      update_columns(seen_notification_id: notification_id.to_i)
+      true
+    else
+      false
+    end
   end
 
   def publish_notifications_state
@@ -364,7 +385,8 @@ class User < ActiveRecord::Base
                         unread_private_messages: unread_private_messages,
                         total_unread_notifications: total_unread_notifications,
                         last_notification: json,
-                        recent: recent
+                        recent: recent,
+                        seen_notification_id: seen_notification_id
                        },
                        user_ids: [id] # only publish the notification to this user
     )
@@ -409,10 +431,10 @@ class User < ActiveRecord::Base
     self.password_hash == hash_password(password, salt)
   end
 
-  def first_day_user?
+  def new_user_posting_on_first_day?
     !staff? &&
     trust_level < TrustLevel[2] &&
-    created_at >= 24.hours.ago
+    (self.first_post_created_at.nil? || self.first_post_created_at >= 24.hours.ago)
   end
 
   def new_user?
@@ -476,6 +498,7 @@ class User < ActiveRecord::Base
     update_previous_visit(now)
     # using update_column to avoid the AR transaction
     update_column(:last_seen_at, now)
+    update_column(:first_seen_at, now) unless self.first_seen_at
   end
 
   def self.gravatar_template(email)
@@ -573,11 +596,11 @@ class User < ActiveRecord::Base
   end
 
   def posted_too_much_in_topic?(topic_id)
-
-    # Does not apply to staff, non-new members or your own topics
-    return false if staff? ||
-                    (trust_level != TrustLevel[0]) ||
-                    Topic.where(id: topic_id, user_id: id).exists?
+    # Does not apply to staff and non-new members...
+    return false if staff? || (trust_level != TrustLevel[0])
+    # ... your own topics or in private messages
+    topic = Topic.where(id: topic_id).first
+    return false if topic.try(:private_message?) || (topic.try(:user_id) == self.id)
 
     last_action_in_topic = UserAction.last_action_in_topic(id, topic_id)
     since_reply = Post.where(user_id: id, topic_id: topic_id)
@@ -611,7 +634,10 @@ class User < ActiveRecord::Base
   # Use this helper to determine if the user has a particular trust level.
   # Takes into account admin, etc.
   def has_trust_level?(level)
-    raise "Invalid trust level #{level}" unless TrustLevel.valid?(level)
+    unless TrustLevel.valid?(level)
+      raise InvalidTrustLevel.new("Invalid trust level #{level}")
+    end
+
     admin? || moderator? || staged? || TrustLevel.compare(trust_level, level)
   end
 
@@ -702,12 +728,16 @@ class User < ActiveRecord::Base
 
   # Flag all posts from a user as spam
   def flag_linked_posts_as_spam
-    admin = Discourse.system_user
+    disagreed_flag_post_ids = PostAction.where(post_action_type_id: PostActionType.types[:spam])
+                                        .where.not(disagreed_at: nil)
+                                        .pluck(:post_id)
 
-    disagreed_flag_post_ids = PostAction.where(post_action_type_id: PostActionType.types[:spam]).where.not(disagreed_at: nil).pluck(:post_id)
-    topic_links.includes(:post).where.not(post_id: disagreed_flag_post_ids).each do |tl|
+    topic_links.includes(:post)
+               .where.not(post_id: disagreed_flag_post_ids)
+               .each do |tl|
       begin
-        PostAction.act(admin, tl.post, PostActionType.types[:spam], message: I18n.t('flag_reason.spam_hosts'))
+        message = I18n.t('flag_reason.spam_hosts', domain: tl.domain)
+        PostAction.act(Discourse.system_user, tl.post, PostActionType.types[:spam], message: message)
       rescue PostAction::AlreadyActed
         # If the user has already acted, just ignore it
       end
@@ -754,7 +784,8 @@ class User < ActiveRecord::Base
     avatar = user_avatar || create_user_avatar
 
     if SiteSetting.automatically_download_gravatars? && !avatar.last_gravatar_download_attempt
-      Jobs.enqueue(:update_gravatar, user_id: self.id, avatar_id: avatar.id)
+      Jobs.cancel_scheduled_job(:update_gravatar, user_id: self.id, avatar_id: avatar.id)
+      Jobs.enqueue_in(1.second, :update_gravatar, user_id: self.id, avatar_id: avatar.id)
     end
 
     # mark all the user's quoted posts as "needing a rebake"
@@ -768,10 +799,11 @@ class User < ActiveRecord::Base
   def associated_accounts
     result = []
 
-    result << "Twitter(#{twitter_user_info.screen_name})" if twitter_user_info
-    result << "Facebook(#{facebook_user_info.username})"  if facebook_user_info
-    result << "Google(#{google_user_info.email})"         if google_user_info
-    result << "Github(#{github_user_info.screen_name})"   if github_user_info
+    result << "Twitter(#{twitter_user_info.screen_name})"               if twitter_user_info
+    result << "Facebook(#{facebook_user_info.username})"                if facebook_user_info
+    result << "Google(#{google_user_info.email})"                       if google_user_info
+    result << "Github(#{github_user_info.screen_name})"                 if github_user_info
+    result << "#{oauth2_user_info.provider}(#{oauth2_user_info.email})" if oauth2_user_info
 
     user_open_ids.each do |oid|
       result << "OpenID #{oid.url[0..20]}...(#{oid.email})"
@@ -840,6 +872,15 @@ class User < ActiveRecord::Base
       custom_fields["master_id"].to_i > 0
   end
 
+  def is_singular_admin?
+    User.where(admin: true).where.not(id: id).where.not(id: Discourse::SYSTEM_USER_ID).blank?
+  end
+
+  def logged_out
+    MessageBus.publish "/logout", self.id, user_ids: [self.id]
+    DiscourseEvent.trigger(:user_logged_out, self)
+  end
+
   protected
 
   def badge_grant
@@ -896,7 +937,7 @@ class User < ActiveRecord::Base
   end
 
   def hash_password(password, salt)
-    raise "password is too long" if password.size > User.max_password_length
+    raise StandardError.new("password is too long") if password.size > User.max_password_length
     Pbkdf2.hash_password(password, salt, Rails.configuration.pbkdf2_iterations, Rails.configuration.pbkdf2_algorithm)
   end
 
@@ -929,7 +970,7 @@ class User < ActiveRecord::Base
 
   def send_approval_email
     if SiteSetting.must_approve_users
-      Jobs.enqueue(:user_email,
+      Jobs.enqueue(:critical_user_email,
         type: :signup_after_approval,
         user_id: id,
         email_token: email_tokens.first.token
@@ -938,6 +979,8 @@ class User < ActiveRecord::Base
   end
 
   def set_default_categories_preferences
+    return if self.staged?
+
     values = []
 
     %w{watching tracking muted}.each do |s|
@@ -958,7 +1001,7 @@ class User < ActiveRecord::Base
                      .joins('INNER JOIN user_stats AS us ON us.user_id = users.id')
                      .where("created_at < ?", SiteSetting.purge_unactivated_users_grace_period_days.days.ago)
                      .where('NOT admin AND NOT moderator')
-                     .limit(100)
+                     .limit(200)
 
     destroyer = UserDestroyer.new(Discourse.system_user)
     to_destroy.each do |u|
@@ -968,6 +1011,11 @@ class User < ActiveRecord::Base
         # if for some reason the user can't be deleted, continue on to the next one
       end
     end
+  end
+
+  def trigger_user_created_event
+    DiscourseEvent.trigger(:user_created, self)
+    true
   end
 
   private
@@ -982,7 +1030,6 @@ class User < ActiveRecord::Base
       update_column(:previous_visit_at, last_seen_at)
     end
   end
-
 
 end
 
@@ -1026,6 +1073,8 @@ end
 #  registration_ip_address :inet
 #  trust_level_locked      :boolean          default(FALSE), not null
 #  staged                  :boolean          default(FALSE), not null
+#  first_seen_at           :datetime
+#  auth_token_updated_at   :datetime
 #
 # Indexes
 #
