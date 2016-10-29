@@ -33,6 +33,7 @@ class ApplicationController < ActionController::Base
   end
 
   before_filter :set_current_user_for_logs
+  before_filter :clear_notifications
   before_filter :set_locale
   before_filter :set_mobile_view
   before_filter :inject_preview_style
@@ -43,6 +44,7 @@ class ApplicationController < ActionController::Base
   before_filter :redirect_to_login_if_required
   before_filter :check_xhr
   after_filter  :add_readonly_header
+  after_filter  :perform_refresh_session
 
   layout :set_layout
 
@@ -51,11 +53,15 @@ class ApplicationController < ActionController::Base
   end
 
   def use_crawler_layout?
-    @use_crawler_layout ||= (has_escaped_fragment? || CrawlerDetection.crawler?(request.user_agent))
+    @use_crawler_layout ||= (has_escaped_fragment? || CrawlerDetection.crawler?(request.user_agent) || params.key?("print"))
   end
 
   def add_readonly_header
     response.headers['Discourse-Readonly'] = 'true' if Discourse.readonly_mode?
+  end
+
+  def perform_refresh_session
+    refresh_session(current_user)
   end
 
   def slow_platform?
@@ -74,9 +80,13 @@ class ApplicationController < ActionController::Base
     render 'default/empty'
   end
 
+  def render_rate_limit_error(e)
+    render_json_error e.description, type: :rate_limit, status: 429
+  end
+
   # If they hit the rate limiter
   rescue_from RateLimiter::LimitExceeded do |e|
-    render_json_error e.description, type: :rate_limit, status: 429
+    render_rate_limit_error(e)
   end
 
   rescue_from PG::ReadOnlySqlTransaction do |e|
@@ -93,7 +103,18 @@ class ApplicationController < ActionController::Base
     end
   end
 
-  rescue_from Discourse::NotFound do
+  class PluginDisabled < StandardError; end
+
+  # Handles requests for giant IDs that throw pg exceptions
+  rescue_from RangeError do |e|
+    if e.message =~ /ActiveRecord::ConnectionAdapters::PostgreSQL::OID::Integer/
+      rescue_discourse_actions(:not_found, 404)
+    else
+      raise e
+    end
+  end
+
+  rescue_from Discourse::NotFound, PluginDisabled  do
     rescue_discourse_actions(:not_found, 404)
   end
 
@@ -119,8 +140,6 @@ class ApplicationController < ActionController::Base
     end
   end
 
-  class PluginDisabled < StandardError; end
-
   # If a controller requires a plugin, it will raise an exception if that plugin is
   # disabled. This allows plugins to be disabled programatically.
   def self.requires_plugin(plugin_name)
@@ -137,8 +156,38 @@ class ApplicationController < ActionController::Base
     response.headers["X-Discourse-Route"] = "#{controller_name}/#{action_name}"
   end
 
+  def clear_notifications
+    if current_user && !Discourse.readonly_mode?
+
+      cookie_notifications = cookies['cn'.freeze]
+      notifications = request.headers['Discourse-Clear-Notifications'.freeze]
+
+      if cookie_notifications
+        if notifications.present?
+          notifications += "," << cookie_notifications
+        else
+          notifications = cookie_notifications
+        end
+      end
+
+      if notifications.present?
+        notification_ids = notifications.split(",").map(&:to_i)
+        Notification.read(current_user, notification_ids)
+        cookies.delete('cn')
+      end
+    end
+  end
+
   def set_locale
-    I18n.locale = current_user.try(:effective_locale) || SiteSetting.default_locale
+    if !current_user
+      if SiteSetting.set_locale_from_accept_language_header
+        I18n.locale = locale_from_header
+      else
+        I18n.locale = SiteSetting.default_locale
+      end
+    else
+      I18n.locale = current_user.effective_locale
+    end
     I18n.ensure_all_loaded!
   end
 
@@ -246,16 +295,17 @@ class ApplicationController < ActionController::Base
     Middleware::AnonymousCache.anon_cache(request.env, time_length)
   end
 
-  def fetch_user_from_params(opts=nil)
+  def fetch_user_from_params(opts=nil, eager_load = [])
     opts ||= {}
     user = if params[:username]
-      username_lower = params[:username].downcase
-      username_lower.gsub!(/\.json$/, '')
+      username_lower = params[:username].downcase.chomp('.json')
       find_opts = { username_lower: username_lower }
       find_opts[:active] = true unless opts[:include_inactive] || current_user.try(:staff?)
-      User.find_by(find_opts)
+      result = User
+      (result = result.includes(*eager_load)) if !eager_load.empty?
+      result.find_by(find_opts)
     elsif params[:external_id]
-      external_id = params[:external_id].gsub(/\.json$/, '')
+      external_id = params[:external_id].chomp('.json')
       SingleSignOnRecord.find_by(external_id: external_id).try(:user)
     end
     raise Discourse::NotFound if user.blank?
@@ -267,9 +317,7 @@ class ApplicationController < ActionController::Base
   def post_ids_including_replies
     post_ids = params[:post_ids].map {|p| p.to_i}
     if params[:reply_post_ids]
-      post_ids << PostReply.where(post_id: params[:reply_post_ids].map {|p| p.to_i}).pluck(:reply_id)
-      post_ids.flatten!
-      post_ids.uniq!
+      post_ids |= PostReply.where(post_id: params[:reply_post_ids].map {|p| p.to_i}).pluck(:reply_id)
     end
     post_ids
   end
@@ -281,7 +329,40 @@ class ApplicationController < ActionController::Base
     request.session_options[:skip] = true
   end
 
+  def permalink_redirect_or_not_found
+    url = request.fullpath
+    permalink = Permalink.find_by_url(url)
+
+    if permalink.present?
+      # permalink present, redirect to that URL
+      if permalink.external_url
+        redirect_to permalink.external_url, status: :moved_permanently
+      elsif permalink.target_url
+        redirect_to "#{Discourse::base_uri}#{permalink.target_url}", status: :moved_permanently
+      else
+        raise Discourse::NotFound
+      end
+    else
+      # redirect to 404
+      raise Discourse::NotFound
+    end
+  end
+
   private
+
+    def locale_from_header
+      begin
+        # Rails I18n uses underscores between the locale and the region; the request
+        # headers use hyphens.
+        require 'http_accept_language' unless defined? HttpAcceptLanguage
+        available_locales = I18n.available_locales.map { |locale| locale.to_s.tr('_', '-') }
+        parser = HttpAcceptLanguage::Parser.new(request.env["HTTP_ACCEPT_LANGUAGE"])
+        parser.language_region_compatible_from(available_locales).tr('-', '_')
+      rescue
+        # If Accept-Language headers are not set.
+        I18n.default_locale
+      end
+    end
 
     def preload_anonymous_data
       store_preloaded("site", Site.json_for(guardian))
@@ -387,7 +468,7 @@ class ApplicationController < ActionController::Base
 
     def check_xhr
       # bypass xhr check on PUT / POST / DELETE provided api key is there, otherwise calling api is annoying
-      return if !request.get? && api_key_valid?
+      return if !request.get? && is_api?
       raise RenderEmpty.new unless ((request.format && request.format.json?) || request.xhr?)
     end
 
@@ -399,12 +480,20 @@ class ApplicationController < ActionController::Base
       raise Discourse::InvalidAccess.new unless current_user && current_user.staff?
     end
 
+    def ensure_admin
+      raise Discourse::InvalidAccess.new unless current_user && current_user.admin?
+    end
+
+    def ensure_wizard_enabled
+      raise Discourse::InvalidAccess.new unless SiteSetting.wizard_enabled?
+    end
+
     def destination_url
       request.original_url unless request.original_url =~ /uploads/
     end
 
     def redirect_to_login_if_required
-      return if current_user || (request.format.json? && api_key_valid?)
+      return if current_user || (request.format.json? && is_api?)
 
       # redirect user to the SSO page if we need to log in AND SSO is enabled
       if SiteSetting.login_required?
@@ -428,11 +517,11 @@ class ApplicationController < ActionController::Base
     def build_not_found_page(status=404, layout=false)
       category_topic_ids = Category.pluck(:topic_id).compact
       @container_class = "wrap not-found-container"
-      @top_viewed = Topic.where.not(id: category_topic_ids).top_viewed(10)
+      @top_viewed = TopicQuery.new(nil, {except_topic_ids: category_topic_ids}).list_top_for("monthly").topics.first(10)
       @recent = Topic.where.not(id: category_topic_ids).recent(10)
       @slug =  params[:slug].class == String ? params[:slug] : ''
       @slug =  (params[:id].class == String ? params[:id] : '') if @slug.blank?
-      @slug.gsub!('-',' ')
+      @slug.tr!('-',' ')
       render_to_string status: status, layout: layout, formats: [:html], template: '/exceptions/not_found'
     end
 
@@ -447,10 +536,6 @@ class ApplicationController < ActionController::Base
         post_serializer.post_actions = counts
       end
       render_json_dump(post_serializer)
-    end
-
-    def api_key_valid?
-      request["api_key"] && ApiKey.where(key: request["api_key"]).exists?
     end
 
     # returns an array of integers given a param key

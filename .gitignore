@@ -4,11 +4,11 @@
 # or operating system, you probably want to add a global ignore instead:
 #   git config --global core.excludesfile ~/.gitignore_global
 
-tags
-
 .DS_Store
 ._.DS_Store
 dump.rdb
+
+bin/*
 
 .sass-cache/*
 public/csv/*
@@ -16,7 +16,6 @@ public/plugins/*
 public/tombstone/*
 
 # Ignore bundler config
-/bin
 /.bundle
 /.vagrant
 /.vagrantfile
@@ -50,6 +49,9 @@ log/
 
 # Ignore Eclipse .buildpath file
 /.buildpath
+
+# Ignore byebug history
+/.byebug_history
 
 # Ignore RubyMine settings
 /.idea
@@ -98,3 +100,7 @@ config/version.rb
 bundler_stubs/*
 
 vendor/bundle/*
+*.db
+
+#ignore jetbrains ide file
+*.iml

@@ -1,6 +1,3 @@
-import LoadMore from "discourse/mixins/load-more";
+import { createViewWithBodyClass } from 'discourse/lib/create-view';
 
-export default Ember.View.extend(LoadMore, {
-  eyelineSelector: '.user-stream .notification',
-  classNames: ['user-stream', 'notification-history']
-});
+export default createViewWithBodyClass('user-notifications-page');

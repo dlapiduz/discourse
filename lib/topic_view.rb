@@ -5,11 +5,15 @@ require_dependency 'gaps'
 
 class TopicView
 
-  attr_reader :topic, :posts, :guardian, :filtered_posts, :chunk_size
+  attr_reader :topic, :posts, :guardian, :filtered_posts, :chunk_size, :print
   attr_accessor :draft, :draft_key, :draft_sequence, :user_custom_fields, :post_custom_fields
 
   def self.slow_chunk_size
     10
+  end
+
+  def self.print_chunk_size
+    1000
   end
 
   def self.chunk_size
@@ -37,17 +41,19 @@ class TopicView
     @user = user
     @guardian = Guardian.new(@user)
     @topic = find_topic(topic_id)
+    @print = options[:print].present?
     check_and_raise_exceptions
 
     options.each do |key, value|
       self.instance_variable_set("@#{key}".to_sym, value)
     end
 
-    # work around people somehow sending in arrays,
-    # arrays are not supported
-    @page = @page.to_i rescue 1
-    @page = 1 if @page.zero?
-    @chunk_size = options[:slow_platform] ? TopicView.slow_chunk_size : TopicView.chunk_size
+    @page = 1 if (!@page || @page.zero?)
+    @chunk_size = case
+                    when options[:slow_platform] then TopicView.slow_chunk_size
+                    when @print then TopicView.print_chunk_size
+                    else TopicView.chunk_size
+                  end
     @limit ||= @chunk_size
 
     setup_filtered_posts
@@ -57,13 +63,11 @@ class TopicView
 
     filter_posts(options)
 
-    if SiteSetting.public_user_custom_fields.present? && @posts
-      @user_custom_fields = User.custom_fields_for_ids(@posts.map(&:user_id), SiteSetting.public_user_custom_fields.split('|'))
-    end
-
-    if @guardian.is_staff? && SiteSetting.staff_user_custom_fields.present? && @posts
-      @user_custom_fields ||= {}
-      @user_custom_fields.deep_merge!(User.custom_fields_for_ids(@posts.map(&:user_id), SiteSetting.staff_user_custom_fields.split('|')))
+    if @posts
+      added_fields = User.whitelisted_user_custom_fields(@guardian)
+      if added_fields.present?
+        @user_custom_fields = User.custom_fields_for_ids(@posts.map(&:user_id), added_fields)
+      end
     end
 
     whitelisted_fields = TopicView.whitelisted_post_custom_fields(@user)
@@ -76,7 +80,7 @@ class TopicView
   end
 
   def canonical_path
-    path = @topic.relative_url
+    path = relative_url
     path << if @post_number
       page = ((@post_number.to_i - 1) / @limit) + 1
       (page > 1) ? "?page=#{page}" : ""
@@ -118,27 +122,27 @@ class TopicView
 
   def prev_page_path
     if prev_page > 1
-      "#{@topic.relative_url}?page=#{prev_page}"
+      "#{relative_url}?page=#{prev_page}"
     else
-      @topic.relative_url
+      relative_url
     end
   end
 
   def next_page_path
-    "#{@topic.relative_url}?page=#{next_page}"
+    "#{relative_url}?page=#{next_page}"
   end
 
   def absolute_url
-    "#{Discourse.base_url}#{@topic.relative_url}"
+    "#{Discourse.base_url}#{relative_url}"
   end
 
   def relative_url
-    @topic.relative_url
+    "#{@topic.relative_url}#{@print ? '/print' : ''}"
   end
 
   def page_title
     title = @topic.title
-    if @topic.category_id != SiteSetting.uncategorized_category_id && @topic.category_id && @topic.category
+    if SiteSetting.topic_page_title_includes_category && @topic.category_id != SiteSetting.uncategorized_category_id && @topic.category_id && @topic.category
       title += " - #{topic.category.name}"
     end
     title
@@ -175,7 +179,12 @@ class TopicView
   end
 
   def image_url
-    @topic.image_url || SiteSetting.default_opengraph_image_url
+    if @post_number.present? && @post_number.to_i != 1 && @desired_post.present?
+      # show poster avatar
+      @desired_post.user.avatar_template_url.gsub("{size}", "100") if @desired_post.user
+    else
+      @topic.image_url
+    end
   end
 
   def filter_posts(opts = {})
@@ -183,7 +192,7 @@ class TopicView
     return filter_posts_by_ids(opts[:post_ids]) if opts[:post_ids].present?
     return filter_best(opts[:best], opts) if opts[:best].present?
 
-    filter_posts_paged(opts[:page].to_i)
+    filter_posts_paged(@page)
   end
 
   def primary_group_names
@@ -295,7 +304,6 @@ class TopicView
   end
 
   def suggested_topics
-    return nil if topic.private_message?
     @suggested_topics ||= TopicQuery.new(@user).list_suggested_for(topic)
   end
 
@@ -312,7 +320,6 @@ class TopicView
     @filtered_posts.by_newest.with_user.first(25)
   end
 
-
   def current_post_ids
     @current_post_ids ||= if @posts.is_a?(Array)
       @posts.map {|p| p.id }
@@ -321,8 +328,17 @@ class TopicView
     end
   end
 
+  # Returns an array of [id, post_number, days_ago] tuples. `days_ago` is there for the timeline
+  # calculations.
+  def filtered_post_stream
+    @filtered_post_stream ||= @filtered_posts.order(:sort_order)
+                                             .pluck(:id,
+                                                    :post_number,
+                                                    'EXTRACT(DAYS FROM CURRENT_TIMESTAMP - created_at)::INT AS days_ago')
+  end
+
   def filtered_post_ids
-    @filtered_post_ids ||= filter_post_ids_by(:sort_order)
+    @filtered_post_ids ||= filtered_post_stream.map {|tuple| tuple[0]}
   end
 
   protected
@@ -349,7 +365,7 @@ class TopicView
     visible_types = Topic.visible_post_types(@user)
 
     if @user.present?
-      posts.where("user_id = ? OR post_type IN (?)", @user.id, visible_types)
+      posts.where("posts.user_id = ? OR post_type IN (?)", @user.id, visible_types)
     else
       posts.where(post_type: visible_types)
     end
@@ -358,7 +374,7 @@ class TopicView
   def filter_posts_by_ids(post_ids)
     # TODO: Sort might be off
     @posts = Post.where(id: post_ids, topic_id: @topic.id)
-                 .includes(:user, :reply_to_user)
+                 .includes(:user, :reply_to_user, :incoming_email)
                  .order('sort_order')
     @posts = filter_post_types(@posts)
     @posts = @posts.with_deleted if @guardian.can_see_deleted_posts?
@@ -387,7 +403,8 @@ class TopicView
   def unfiltered_posts
     result = filter_post_types(@topic.posts)
     result = result.with_deleted if @guardian.can_see_deleted_posts?
-    result = @topic.posts.where("user_id IS NOT NULL") if @exclude_deleted_users
+    result = result.where("user_id IS NOT NULL") if @exclude_deleted_users
+    result = result.where(hidden: false) if @exclude_hidden
     result
   end
 
@@ -433,11 +450,6 @@ class TopicView
       raise Discourse::NotLoggedIn.new
     end
     raise Discourse::InvalidAccess.new("can't see #{@topic}", @topic) unless guardian.can_see?(@topic)
-  end
-
-
-  def filter_post_ids_by(sort_order)
-    @filtered_posts.order(sort_order).pluck(:id)
   end
 
   def get_minmax_ids(post_number)

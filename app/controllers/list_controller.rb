@@ -35,6 +35,8 @@ class ListController < ApplicationController
     Discourse.anonymous_filters.map { |f| :"parent_category_category_none_#{f}" },
     # category feeds
     :category_feed,
+    # user topics feed
+    :user_topics_feed,
     # top summaries
     :top,
     :category_top,
@@ -107,7 +109,7 @@ class ListController < ApplicationController
   [:topics_by, :private_messages, :private_messages_sent, :private_messages_unread, :private_messages_archive, :private_messages_group, :private_messages_group_archive].each do |action|
     define_method("#{action}") do
       list_opts = build_topic_list_options
-      target_user = fetch_user_from_params(include_inactive: current_user.try(:staff?))
+      target_user = fetch_user_from_params({ include_inactive: current_user.try(:staff?) }, [:user_stat, :user_option])
       guardian.ensure_can_see_private_messages!(target_user.id) unless action == :topics_by
       list = generate_list_for(action.to_s, target_user, list_opts)
       url_prefix = "topics" unless action == :topics_by
@@ -129,6 +131,18 @@ class ListController < ApplicationController
     render 'list', formats: [:rss]
   end
 
+  def top_feed
+    discourse_expires_in 1.minute
+
+    @title = "#{SiteSetting.title} - #{I18n.t("rss_description.top")}"
+    @link = "#{Discourse.base_url}/top"
+    @atom_link = "#{Discourse.base_url}/top.rss"
+    @description = I18n.t("rss_description.top")
+    @topic_list = TopicQuery.new(nil).list_top_for("monthly")
+
+    render 'list', formats: [:rss]
+  end
+
   def category_feed
     guardian.ensure_can_see!(@category)
     discourse_expires_in 1.minute
@@ -138,6 +152,19 @@ class ListController < ApplicationController
     @atom_link = "#{Discourse.base_url}#{@category.url}.rss"
     @description = "#{I18n.t('topics_in_category', category: @category.name)} #{@category.description}"
     @topic_list = TopicQuery.new.list_new_in_category(@category)
+
+    render 'list', formats: [:rss]
+  end
+
+  def user_topics_feed
+    discourse_expires_in 1.minute
+    target_user = fetch_user_from_params
+
+    @title = "#{SiteSetting.title} - #{I18n.t("rss_description.user_topics", username: target_user.username)}"
+    @link = "#{Discourse.base_url}/users/#{target_user.username}/activity/topics"
+    @atom_link = "#{Discourse.base_url}/users/#{target_user.username}/activity/topics.rss"
+    @description = I18n.t("rss_description.user_topics", username: target_user.username)
+    @topic_list = TopicQuery.new(nil, order: 'created').send("list_topics_by", target_user)
 
     render 'list', formats: [:rss]
   end
@@ -175,6 +202,7 @@ class ListController < ApplicationController
       list.for_period = period
       list.more_topics_url = construct_url_with(:next, top_options)
       list.prev_topics_url = construct_url_with(:prev, top_options)
+      @rss = "top"
 
       if use_crawler_layout?
         @title = I18n.t("js.filters.top.#{period}.title")
@@ -231,7 +259,7 @@ class ListController < ApplicationController
     parent_category_id = nil
     if parent_slug_or_id.present?
       parent_category_id = Category.query_parent_category(parent_slug_or_id)
-      redirect_or_not_found and return if parent_category_id.blank? && !id
+      permalink_redirect_or_not_found and return if parent_category_id.blank? && !id
     end
 
     @category = Category.query_category(slug_or_id, parent_category_id)
@@ -242,7 +270,7 @@ class ListController < ApplicationController
       (redirect_to category.url, status: 301) && return if category
     end
 
-    redirect_or_not_found and return if !@category
+    permalink_redirect_or_not_found and return if !@category
 
     @description_meta = @category.description_text
     raise Discourse::NotFound unless guardian.can_see?(@category)
@@ -306,36 +334,19 @@ class ListController < ApplicationController
       return period if top_topics.count >= SiteSetting.topics_per_period_in_top_page
     end
     # default period is yearly
-    SiteSetting.top_page_default_timeframe
+    SiteSetting.top_page_default_timeframe.to_sym
   end
 
   def self.best_periods_for(date)
     date ||= 1.year.ago
+    default_period = SiteSetting.top_page_default_timeframe.to_sym
     periods = []
-    periods << :daily   if date >   8.days.ago
-    periods << :weekly  if date >  35.days.ago
-    periods << :monthly if date > 180.days.ago
-    periods << :yearly
+    periods << default_period if :all     != default_period
+    periods << :daily         if :daily   != default_period && date >   8.days.ago
+    periods << :weekly        if :weekly  != default_period && date >  35.days.ago
+    periods << :monthly       if :monthly != default_period && date > 180.days.ago
+    periods << :yearly        if :yearly  != default_period
     periods
-  end
-
-  def redirect_or_not_found
-    url = request.fullpath
-    permalink = Permalink.find_by_url(url)
-
-    if permalink.present?
-      # permalink present, redirect to that URL
-      if permalink.external_url
-        redirect_to permalink.external_url, status: :moved_permanently
-      elsif permalink.target_url
-        redirect_to "#{Discourse::base_uri}#{permalink.target_url}", status: :moved_permanently
-      else
-        raise Discourse::NotFound
-      end
-    else
-      # redirect to 404
-      raise Discourse::NotFound
-    end
   end
 
 end

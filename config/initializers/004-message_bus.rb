@@ -27,7 +27,7 @@ def setup_message_bus_env(env)
         {
           "Access-Control-Allow-Origin" => Discourse.base_url_no_prefix,
           "Access-Control-Allow-Methods" => "GET, POST",
-          "Access-Control-Allow-Headers" => "X-SILENCE-LOGGER, X-Shared-Session-Key"
+          "Access-Control-Allow-Headers" => "X-SILENCE-LOGGER, X-Shared-Session-Key, Dont-Chunk"
         },
       user_id: user_id,
       group_ids: group_ids,
@@ -61,6 +61,14 @@ MessageBus.is_admin_lookup do |env|
   env["__mb"][:is_admin]
 end
 
+MessageBus.on_middleware_error do |env, e|
+  if Discourse::InvalidAccess === e
+    [403, {}, ["Invalid Access"]]
+  elsif RateLimiter::LimitExceeded === e
+    [429, {}, [e.description]]
+  end
+end
+
 MessageBus.on_connect do |site_id|
   RailsMultisite::ConnectionManagement.establish_connection(db: site_id)
 end
@@ -71,11 +79,10 @@ end
 
 # Point at our redis
 MessageBus.redis_config = GlobalSetting.redis_config
+MessageBus.reliable_pub_sub.max_backlog_size = GlobalSetting.message_bus_max_backlog_size
 
 MessageBus.long_polling_enabled = SiteSetting.enable_long_polling
 MessageBus.long_polling_interval = SiteSetting.long_polling_interval
-
-
 MessageBus.cache_assets = !Rails.env.development?
 MessageBus.enable_diagnostics
 

@@ -10,16 +10,13 @@
     <%- end %>
     <%= render_google_universal_analytics_code %>
     <%= yield :head %>
-    <style>
-        img { max-width: 100%; width: auto; height: auto; }
-    </style>
   </head>
   <body>
     <%- unless customization_disabled? %>
       <%= SiteCustomization.custom_header(session[:preview_style], mobile_view? ? :mobile : :desktop) %>
     <%- end %>
     <header>
-      <a href="<%= path "/" %>"><img src="<%=SiteSetting.logo_url%>" alt="<%=SiteSetting.title%>" id="site-logo"></a>
+      <a href="<%= path "/" %>"><img src="<%=SiteSetting.logo_url%>" alt="<%=SiteSetting.title%>" id="site-logo" style="max-width: 400px;"></a>
     </header>
     <div id="main-outlet" class="wrap">
       <%= yield %>
@@ -39,4 +36,5 @@
       <%= raw SiteCustomization.custom_body_tag(session[:preview_style]) %>
     <%- end %>
   </body>
+  <%= yield :after_body %>
 </html>

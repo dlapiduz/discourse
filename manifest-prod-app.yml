@@ -4,10 +4,8 @@ applications:
   memory: 512M
   instances: 3
   host: community
-  domains:
-  - cloud.gov
   command: bundle exec puma -t 5:5 -p ${PORT:-3000} -e ${RACK_ENV:-development} --preload
 services:
-  - community-redis-swarm
+  - community-redis
   - community-db
-  - discourse-env
+  - email

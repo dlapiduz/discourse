@@ -1,7 +1,3 @@
-import LoadMore from "discourse/mixins/load-more";
+import { createViewWithBodyClass } from 'discourse/lib/create-view';
 
-export default Ember.View.extend(LoadMore, {
-  classNames: ['paginated-topics-list'],
-  eyelineSelector: '.paginated-topics-list .user-invite-list tr',
-  templateName: 'user-invited-show'
-});
+export default createViewWithBodyClass('user-invites-page');

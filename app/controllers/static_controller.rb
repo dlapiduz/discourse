@@ -81,7 +81,7 @@ class StaticController < ApplicationController
            uri.path !~ /\./
 
           destination = uri.path
-          destination = "#{uri.path}?#{uri.query}" if uri.path =~ /new-topic/ || uri.path =~ /new-message/
+          destination = "#{uri.path}?#{uri.query}" if uri.path =~ /new-topic/ || uri.path =~ /new-message/ || uri.path =~ /user-api-key/
         end
       rescue URI::InvalidURIError
         # Do nothing if the URI is invalid
@@ -101,12 +101,13 @@ class StaticController < ApplicationController
 
     data = DistributedMemoizer.memoize('favicon' + SiteSetting.favicon_url, 60*30) do
       begin
-        file = FileHelper.download(SiteSetting.favicon_url, 50.kilobytes, "favicon.png")
+        file = FileHelper.download(SiteSetting.favicon_url, 50.kilobytes, "favicon.png", true)
         data = file.read
         file.unlink
         data
       rescue => e
-        Rails.logger.warn("Invalid favicon_url #{SiteSetting.favicon_url}: #{e}\n#{e.backtrace}")
+        AdminDashboardData.add_problem_message('dashboard.bad_favicon_url', 1800)
+        Rails.logger.debug("Invalid favicon_url #{SiteSetting.favicon_url}: #{e}\n#{e.backtrace}")
         ""
       end
     end

@@ -10,7 +10,8 @@ class Users::OmniauthCallbacksController < ApplicationController
     Auth::GoogleOAuth2Authenticator.new,
     Auth::OpenIdAuthenticator.new("yahoo", "https://me.yahoo.com", trusted: true),
     Auth::GithubAuthenticator.new,
-    Auth::TwitterAuthenticator.new
+    Auth::TwitterAuthenticator.new,
+    Auth::InstagramAuthenticator.new
   ]
 
   skip_before_filter :redirect_to_login_if_required
@@ -18,7 +19,7 @@ class Users::OmniauthCallbacksController < ApplicationController
   layout false
 
   def self.types
-    @types ||= Enum.new(:facebook, :twitter, :google, :yahoo, :github, :persona, :cas)
+    @types ||= Enum.new(:facebook, :instagram, :twitter, :google, :yahoo, :github, :persona, :cas)
   end
 
   # need to be able to call this
@@ -38,10 +39,15 @@ class Users::OmniauthCallbacksController < ApplicationController
     @auth_result = authenticator.after_authenticate(auth)
 
     origin = request.env['omniauth.origin']
+    if cookies[:destination_url].present?
+      origin = cookies[:destination_url]
+      cookies.delete(:destination_url)
+    end
+
     if origin.present?
-      parsed = URI.parse(@origin) rescue nil
+      parsed = URI.parse(origin) rescue nil
       if parsed
-        @origin = parsed.path
+        @origin = "#{parsed.path}?#{parsed.query}"
       end
     end
 
@@ -56,7 +62,8 @@ class Users::OmniauthCallbacksController < ApplicationController
       @auth_result.authenticator_name = authenticator.name
       complete_response_data
 
-      if provider && provider.full_screen_login
+      if (provider && provider.full_screen_login) || cookies['fsl']
+        cookies.delete('fsl')
         cookies['_bypass_cache'] = true
         flash[:authentication_data] = @auth_result.to_client_hash.to_json
         redirect_to @origin
@@ -103,9 +110,11 @@ class Users::OmniauthCallbacksController < ApplicationController
   end
 
   def user_found(user)
-    # automatically activate any account if a provider marked the email valid
-    if !user.active && @auth_result.email_valid
-      user.toggle(:active).save
+    # automatically activate/unstage any account if a provider marked the email valid
+    if @auth_result.email_valid
+      user.staged = false
+      user.active = true
+      user.save
     end
 
     if ScreenedIpAddress.should_block?(request.remote_ip)

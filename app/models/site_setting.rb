@@ -23,6 +23,7 @@ class SiteSetting < ActiveRecord::Base
   end
 
   load_settings(File.join(Rails.root, 'config', 'site_settings.yml'))
+  setup_deprecated_methods
 
   unless Rails.env.test? && ENV['LOAD_PLUGINS'] != "1"
     Dir[File.join(Rails.root, "plugins", "*", "config", "settings.yml")].each do |file|
@@ -85,7 +86,7 @@ class SiteSetting < ActiveRecord::Base
   end
 
   def self.scheme
-    use_https? ? "https" : "http"
+    force_https? ? "https" : "http"
   end
 
   def self.default_categories_selected
@@ -96,15 +97,25 @@ class SiteSetting < ActiveRecord::Base
     ].flatten.to_set
   end
 
-  def self.min_redirected_to_top_period
-    TopTopic.sorted_periods.each do |p|
-      period = p[0]
-      return period if TopTopic.topics_per_period(period) >= SiteSetting.topics_per_period_in_top_page
-    end
+  def self.min_redirected_to_top_period(duration)
+    period = ListController.best_period_for(duration)
+    return period if TopTopic.topics_per_period(period) >= SiteSetting.topics_per_period_in_top_page
+
     # not enough topics
     nil
   end
 
+  def self.email_polling_enabled?
+    SiteSetting.manual_polling_enabled? || SiteSetting.pop3_polling_enabled?
+  end
+
+  def self.attachment_content_type_blacklist_regex
+    @attachment_content_type_blacklist_regex ||= Regexp.union(SiteSetting.attachment_content_type_blacklist.split("|"))
+  end
+
+  def self.attachment_filename_blacklist_regex
+    @attachment_filename_blacklist_regex ||= Regexp.union(SiteSetting.attachment_filename_blacklist.split("|"))
+  end
 end
 
 # == Schema Information
@@ -112,7 +123,7 @@ end
 # Table name: site_settings
 #
 #  id         :integer          not null, primary key
-#  name       :string(255)      not null
+#  name       :string           not null
 #  data_type  :integer          not null
 #  value      :text
 #  created_at :datetime         not null
