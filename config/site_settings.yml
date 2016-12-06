@@ -835,7 +835,7 @@ trust:
 
 security:
   force_https:
-    default: false
+    default: true
     shadowed_by_global: true
   enable_escaped_fragments: true
   allow_index_in_robots_txt: true
