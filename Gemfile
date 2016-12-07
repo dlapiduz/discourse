@@ -22,7 +22,7 @@ gem 'onebox'
 gem 'http_accept_language', '~>2.0.5', require: false
 
 gem 'ember-rails', '0.18.5'
-gem 'ember-source', '1.12.2'
+gem 'ember-source', '2.4.6'
 gem 'barber'
 gem 'babel-transpiler'
 
@@ -40,7 +40,7 @@ gem 'aws-sdk', require: false
 gem 'excon', require: false
 gem 'unf', require: false
 
-gem 'email_reply_trimmer', '0.1.4'
+gem 'email_reply_trimmer', '0.1.6'
 
 # note: for image_optim to correctly work you need to follow
 # https://github.com/toy/image_optim
@@ -96,6 +96,7 @@ end
 group :test do
   gem 'fakeweb', '~> 1.3.0', require: false
   gem 'minitest', require: false
+  gem 'timecop'
 end
 
 group :test, :development do
@@ -112,7 +113,6 @@ group :test, :development do
   gem 'rspec-rails', require: false
   gem 'shoulda', require: false
   gem 'simplecov', require: false
-  gem 'timecop'
   gem 'rspec-given'
   gem 'rspec-html-matchers'
   gem 'spork-rails'
@@ -124,7 +124,6 @@ group :development do
   gem 'bullet', require: !!ENV['BULLET']
   gem 'better_errors'
   gem 'binding_of_caller'
-  gem 'librarian', '>= 0.0.25', require: false
   gem 'annotate'
   gem 'foreman', require: false
 end
