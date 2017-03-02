@@ -19,14 +19,16 @@ class BasicCategorySerializer < ApplicationSerializer
              :notification_level,
              :can_edit,
              :topic_template,
-             :has_children
+             :has_children,
+             :sort_order,
+             :sort_ascending
 
   def include_parent_category_id?
     parent_category_id
   end
 
   def description
-    object.uncategorized? ? SiteSetting.uncategorized_description : object.description
+    object.uncategorized? ? I18n.t('category.uncategorized_description') : object.description
   end
 
   def can_edit
@@ -38,6 +40,6 @@ class BasicCategorySerializer < ApplicationSerializer
   end
 
   def notification_level
-    object.notification_level || CategoryUser.where(user: object.user, category: object).first.try(:notification_level)
+    object.notification_level
   end
 end

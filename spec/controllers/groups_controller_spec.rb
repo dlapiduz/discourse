@@ -200,19 +200,22 @@ describe GroupsController do
       end
 
       it "removes by id" do
-        xhr :delete, :remove_member, id: group.id, user_id: user.id
+        expect do
+          xhr :delete, :remove_member, id: group.id, user_id: user.id
 
-        expect(response).to be_success
-        group.reload
-        expect(group.users.count).to eq(0)
+          expect(response).to be_success
+          group.reload
+        end.to change{group.users.count}.from(1).to(0)
       end
 
       it "removes by username" do
-        xhr :delete, :remove_member, id: group.id, username: user.username
+        expect do
+          xhr :delete, :remove_member, id: group.id, username: user.username
 
-        expect(response).to be_success
-        group.reload
-        expect(group.users.count).to eq(0)
+          expect(response).to be_success
+          group.reload
+
+        end.to change{group.users.count}.from(1).to(0)
       end
 
       it "removes user.primary_group_id when user is removed from group" do
@@ -224,8 +227,32 @@ describe GroupsController do
         user.reload
         expect(user.primary_group_id).to eq(nil)
       end
+
+      it "removes by user_email" do
+        expect do
+          xhr :delete, :remove_member, id: group.id, user_email: user.email
+          expect(response).to be_success
+          group.reload
+        end.to change{group.users.count}.from(1).to(0)
+      end
     end
 
+  end
+
+  describe '.posts_feed' do
+    it 'renders RSS' do
+      get :posts_feed, group_id: group.name, format: :rss
+      expect(response).to be_success
+      expect(response.content_type).to eq('application/rss+xml')
+    end
+  end
+
+  describe '.mentions_feed' do
+    it 'renders RSS' do
+      get :mentions_feed, group_id: group.name, format: :rss
+      expect(response).to be_success
+      expect(response.content_type).to eq('application/rss+xml')
+    end
   end
 
 end

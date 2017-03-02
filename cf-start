@@ -1,0 +1,13 @@
+#!/bin/sh
+
+set -e
+
+if [ "${CF_INSTANCE_INDEX}" = "0" ]; then
+  bundle exec rake db:migrate
+  if [ -n "${ADMIN_EMAIL}" ]; then
+    bundle exec rake "admin:invite[${ADMIN_EMAIL}]"
+  fi
+fi
+
+
+bundle exec puma -t 5:5 -p "${PORT:-3000}" -e "${RACK_ENV:-development}" --preload

@@ -4,6 +4,8 @@ import { throwAjaxError } from 'discourse/lib/ajax-error';
 import Quote from 'discourse/lib/quote';
 import Draft from 'discourse/models/draft';
 import computed from 'ember-addons/ember-computed-decorators';
+import { escapeExpression, tinyAvatar } from 'discourse/lib/utilities';
+import { emojiUnescape } from 'discourse/lib/text';
 
 const CLOSED = 'closed',
       SAVING = 'saving',
@@ -21,6 +23,7 @@ const CLOSED = 'closed',
       _create_serializer = {
         raw: 'reply',
         title: 'title',
+        unlist_topic: 'unlistTopic',
         category: 'categoryId',
         topic_id: 'topic.id',
         is_warning: 'isWarning',
@@ -28,16 +31,19 @@ const CLOSED = 'closed',
         archetype: 'archetypeId',
         target_usernames: 'targetUsernames',
         typing_duration_msecs: 'typingTime',
-        composer_open_duration_msecs: 'composerTime'
+        composer_open_duration_msecs: 'composerTime',
+        tags: 'tags'
       },
 
       _edit_topic_serializer = {
         title: 'topic.title',
-        categoryId: 'topic.category.id'
+        categoryId: 'topic.category.id',
+        tags: 'topic.tags'
       };
 
 const Composer = RestModel.extend({
   _categoryId: null,
+  unlistTopic: false,
 
   archetypes: function() {
     return this.site.get('archetypes');
@@ -113,7 +119,7 @@ const Composer = RestModel.extend({
   }.property().volatile(),
 
   archetype: function() {
-    return this.get('archetypes').findProperty('id', this.get('archetypeId'));
+    return this.get('archetypes').findBy('id', this.get('archetypeId'));
   }.property('archetypeId'),
 
   archetypeChanged: function() {
@@ -139,7 +145,7 @@ const Composer = RestModel.extend({
       const postNumber = this.get('post.post_number');
       postLink = "<a href='" + (topic.get('url')) + "/" + postNumber + "'>" +
         I18n.t("post.post_number", { number: postNumber }) + "</a>";
-      topicLink = "<a href='" + (topic.get('url')) + "'> " + Discourse.Utilities.escapeExpression(topic.get('title')) + "</a>";
+      topicLink = "<a href='" + (topic.get('url')) + "'> " + escapeExpression(topic.get('title')) + "</a>";
       usernameLink = "<a href='" + (topic.get('url')) + "/" + postNumber + "'>" + this.get('post.username') + "</a>";
     }
 
@@ -149,16 +155,16 @@ const Composer = RestModel.extend({
     if (post) {
       postDescription = I18n.t('post.' +  this.get('action'), {
         link: postLink,
-        replyAvatar: Discourse.Utilities.tinyAvatar(post.get('avatar_template')),
+        replyAvatar: tinyAvatar(post.get('avatar_template')),
         username: this.get('post.username'),
         usernameLink
       });
 
-      if (!Discourse.Mobile.mobileView) {
+      if (!this.site.mobileView) {
         const replyUsername = post.get('reply_to_user.username');
         const replyAvatarTemplate = post.get('reply_to_user.avatar_template');
         if (replyUsername && replyAvatarTemplate && this.get('action') === EDIT) {
-          postDescription += " <i class='fa fa-mail-forward reply-to-glyph'></i> " + Discourse.Utilities.tinyAvatar(replyAvatarTemplate) + " " + replyUsername;
+          postDescription += " <i class='fa fa-mail-forward reply-to-glyph'></i> " + tinyAvatar(replyAvatarTemplate) + " " + replyUsername;
         }
       }
     }
@@ -169,7 +175,7 @@ const Composer = RestModel.extend({
       case REPLY:
       case EDIT:
         if (postDescription) return postDescription;
-        if (topic) return I18n.t('post.reply_topic', { link: topicLink });
+        if (topic) return emojiUnescape(I18n.t('post.reply_topic', { link: topicLink }));
     }
 
   }.property('action', 'post', 'topic', 'topic.title'),
@@ -358,20 +364,29 @@ const Composer = RestModel.extend({
     return before.length + text.length;
   },
 
+  prependText(text, opts) {
+    const reply = (this.get('reply') || '');
+
+    if (opts && opts.new_line && reply.length > 0) {
+      text = text.trim() + "\n\n";
+    }
+    this.set('reply', text + reply);
+  },
+
   applyTopicTemplate(oldCategoryId, categoryId) {
     if (this.get('action') !== CREATE_TOPIC) { return; }
     let reply = this.get('reply');
 
     // If the user didn't change the template, clear it
     if (oldCategoryId) {
-      const oldCat = this.site.categories.findProperty('id', oldCategoryId);
+      const oldCat = this.site.categories.findBy('id', oldCategoryId);
       if (oldCat && (oldCat.get('topic_template') === reply)) {
         reply = "";
       }
     }
 
     if (!Ember.isEmpty(reply)) { return; }
-    const category = this.site.categories.findProperty('id', categoryId);
+    const category = this.site.categories.findBy('id', categoryId);
     if (category) {
       this.set('reply', category.get('topic_template') || "");
     }
@@ -492,6 +507,7 @@ const Composer = RestModel.extend({
       reply: null,
       post: null,
       title: null,
+      unlistTopic: false,
       editReason: null,
       stagedPost: false,
       typingTime: 0,
@@ -527,7 +543,7 @@ const Composer = RestModel.extend({
       cooked: this.getCookedHtml()
     };
 
-    this.set('composeState', CLOSED);
+    this.set('composeState', SAVING);
 
     var rollback = throwAjaxError(function(){
       post.set('cooked', oldCooked);
@@ -535,6 +551,8 @@ const Composer = RestModel.extend({
     });
 
     return promise.then(function() {
+      // rest model only sets props after it is saved
+      post.set("cooked", props.cooked);
       return post.save(props).then(function(result) {
         self.clearState();
         return result;
@@ -634,6 +652,11 @@ const Composer = RestModel.extend({
         return result;
       }
 
+      // We sometimes want to hide the `reply_to_user` if the post contains a quote
+      if (result.responseJson && result.responseJson.post && !result.responseJson.post.reply_to_user) {
+        createdPost.set('reply_to_user', null);
+      }
+
       if (topic) {
         // It's no longer a new post
         topic.set('draft_sequence', result.target.draft_sequence);
@@ -663,6 +686,10 @@ const Composer = RestModel.extend({
     }).catch(throwAjaxError(function() {
       if (postStream) {
         postStream.undoPost(createdPost);
+
+        if (post) {
+          post.set('reply_count', post.get('reply_count') - 1);
+        }
       }
       Ember.run.next(() => composer.set('composeState', OPEN));
     }));
